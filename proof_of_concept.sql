@@ -1,7 +1,49 @@
+--TODO: documentation
+-- * not a full-fledged message queue system, lacking lots of features (not distributed, prolly not as effective - never benchmarked it, etc.)
+-- * but for simple tasks it's good enough, and one can avoid using one more middleware component
+-- * and where the origin of the jobs is in the db, it makes sense to keep the jobs in the db
+-- * workflows
+--  * when the processing of a job is fast: the one documented below
+--      * open the txn
+--      * lock the rows using txn-level advisory locks and FOR UPDATE
+--      * process the jobs
+--      * UPDATE the state of the jobs to done (or DELETE them)
+--      * commit
+--      * it can be augmented with LISTEN/NOTIFY (the client LISTENs, and a trigger on the job queue table sends NOTIFYs when new jobs are inserted)
+--  * when the processing of a job takes a lot of time: avoid keeping the txn open for long, instead 2 txns
+--      * first txn: lock the rows using session level advisory locks and FOR UPDATE and UPDATE their status from new to being_processed
+--      * process the jobs
+--      * second txn: UPDATE the jobs to done (or DELETE them)
+--      * it can be augmented with LISTEN/NOTIFY (the client LISTENs, and a trigger on the job queue table sends NOTIFYs when new jobs are inserted)
+--      * cleanup daemon: periodically find those rows in being_processed state that are not advisory-locked (and txn-level advisory lock them and FOR UPDATE) and UPDATE them back to new
+--TODO: design
+-- * the job queue table is created by the user (flexibility, allow integration to existing systems, etc.)
+-- * the extension provides a set of functions
+--  * functions that can generate the actual job fetching function(s) (they generate the function, the composite types, the index on the composite type on the sort cols if missing, makes sure pk_columns is indeed a PK)
+--      * generate_fetcher_for_single_job(function_schema name, function_name name, queue_schema name, queue_table name, where_condition text, pk_columns text[], sort_columns text[])
+--      * generate_fetcher_for_single_job(function_name name, queue_schema name, queue_table name, where_condition text, pk_columns text[], sort_columns text[])
+--          * if function_schema is missing/NULL then uses unqualified name (ie. uses the first elem of search_path)
+--          * if queue_schema is NULL then uses unqualified name (ie. uses search_path)
+--      * generate_fetcher_for_multiple_jobs(function_schema name, function_name name, queue_schema name, queue_table name, where_condition text, pk_columns text[], group_and_sort_columns text[], sort_columns text[])
+--      * generate_fetcher_for_multiple_jobs(function_name name, queue_schema name, queue_table name, where_condition text, pk_columns text[], group_and_sort_columns text[], sort_columns text[])
+--      * generate_cleanup_daemon_function(function_schema name, function_name name, queue_schema name, queue_table name, where_condition text, pk_columns text[], state_filter text)
+--  * functions that just return the SQL statements to generate the fetching functions (ie. output of these is EXECUTE'd in the actual generator functions)
+--TODO: testing
+-- testing for parameter validation
+-- testing for parameter defaults
+-- testing for PK checking
+-- testing for index checking/creation
+-- using dblink for concurrent queries
+-- testing if rows are advisory-locked
+-- testing if rows are FOR UPDATE locked
+-- 
+
+
 -- implementing a job queue with parallel workers:
 -- (makes sure that the same job is only processed by one worker and if a worker
 --  dies the job can be picked up by another worker, and workers do not block on
 --  waiting for each other)
+
 CREATE TABLE queue (
 	id serial,
 	is_done boolean,
@@ -9,26 +51,14 @@ CREATE TABLE queue (
 	created_at timestamp,
 	...
 );
--- worker processing one job from the queue:
-BEGIN;
-SELECT *
-	FROM queue
-	WHERE NOT is_done
-		AND pg_try_advisory_xact_lock('queue'::regclass::int, id)
-	FOR UPDATE
-	ORDER BY priority, created_at
-	LIMIT 1;
-<do the actual work>
-UPDATE queue SET processed = true WHERE id = ...;
--- or we can even delete it (and drop "is_done")
-COMMIT;
-
---
--- note: putting the pg_try_advisory_xact_lock() in a query with LIMIT may inadvertedly lock rows (b/c WHERE is executed before LIMIT, though pg usually only executes the WHERE expression on only as much rows as necessary), this approach works around that:
 CREATE TYPE next_job_attrs_t AS (
     id integer,
     is_locked boolean
 );
+
+-- worker processing one job from the queue:
+
+-- note: putting the pg_try_advisory_xact_lock() in a query with LIMIT may inadvertedly lock rows (b/c WHERE is executed before LIMIT, though pg usually only executes the WHERE expression on only as much rows as necessary), this approach works around that:
 WITH RECURSIVE
     next_job AS (
         SELECT ((SELECT min(id) - 1  FROM queue), false)::next_job_attrs_t AS attrs
@@ -48,8 +78,15 @@ SELECT queue.*
             ON ((next_job.attrs).id = queue.id AND (next_job.attrs).is_locked)
     FOR UPDATE;
 
+
+<do the actual work>
+
+UPDATE queue SET processed = true WHERE id = ...; -- or you can even delete it (and drop "is_done" from the table definition)
+
+COMMIT;
+
 --
--- the same as the above, but returns multiple jobs in one batch (as if LIMIT 20 was used in the original query):
+-- the same as the above, but returns multiple (0..20) jobs in one batch:
 --
 CREATE TYPE next_job_attrs_t AS (
     id integer,
@@ -66,8 +103,8 @@ WITH RECURSIVE
                         WHERE NOT is_done AND id > (next_job.attrs).id
                 ),
                 CASE
-                    WHEN (next_job.attrs).is_locked THEN rank + 1
-                    ELSE rank
+                    WHEN (next_job.attrs).is_locked THEN next_job.rank + 1
+                    ELSE next_job.rank
                 END AS rank
             FROM next_job
             WHERE (next_job.attrs).id IS NOT NULL AND next_job.rank < 20
@@ -93,7 +130,13 @@ CREATE TYPE attrs_t AS (
 );
 WITH RECURSIVE
     next_job AS (
-        SELECT (min(id) - 1, (min(col1), min(col2), min(col3) - 1)::sort_cols_t, false)::attrs_t AS attrs FROM queue
+        SELECT attrs
+            FROM (
+                SELECT (id, (col1, col2, col3 - 1)::sort_cols_t, false)::attrs_t AS attrs
+                    FROM queue
+                    ORDER BY col1, col2, col3
+                    LIMIT 1
+            )
         UNION ALL
         SELECT
                 (

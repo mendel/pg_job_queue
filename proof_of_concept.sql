@@ -18,6 +18,8 @@
 --      * cleanup daemon: periodically find those rows in being_processed state that are not advisory-locked (and txn-level advisory lock them and FOR UPDATE) and UPDATE them back to new
 --TODO: design
 -- * the job queue table is created by the user (flexibility, allow integration to existing systems, etc.)
+--  * but also provide a function to generate it for the lazy:
+--      * create_job_queue_table(table_schema name, table_name name, columns
 -- * the extension provides a set of functions
 --  * functions that can generate the actual job fetching function(s) (they generate the function, the composite types, the index on the composite type on the sort cols if missing, makes sure pk_columns is indeed a PK)
 --      * generate_fetcher_for_single_job(function_schema name, function_name name, queue_schema name, queue_table name, where_condition text, pk_columns text[], sort_columns text[])
@@ -33,10 +35,18 @@
 -- testing for parameter defaults
 -- testing for PK checking
 -- testing for index checking/creation
--- using dblink for concurrent queries
--- testing if rows are advisory-locked
--- testing if rows are FOR UPDATE locked
--- 
+-- testing usage of the where condition
+-- testing for ordering of the returned rows
+-- testing for the number of rows returned
+--  * when there are less than N rows
+--  * when there are exactly N rows
+--  * when there are more than N rows
+-- testing for group+sort cols usage
+-- testing if rows are advisory-locked (looking up locks in pg_catalog)
+-- testing if rows are FOR UPDATE locked (looking up locks in pg_catalog)
+-- testing for index usage (looking up index usage in pg_catalog)
+-- testing concurrently fetching rows (using dblink for concurrent queries)
+-- testing 
 
 
 -- implementing a job queue with parallel workers:

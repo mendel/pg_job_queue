@@ -1,3 +1,5 @@
+-- ideas:
+-- * using ctid and not id
 --TODO: documentation
 -- * not a full-fledged message queue system, lacking lots of features (not distributed, prolly not as effective - never benchmarked it, etc.)
 -- * but for simple tasks it's good enough, and one can avoid using one more middleware component
@@ -11,24 +13,23 @@
 --      * commit
 --      * it can be augmented with LISTEN/NOTIFY (the client LISTENs, and a trigger on the job queue table sends NOTIFYs when new jobs are inserted)
 --  * when the processing of a job takes a lot of time: avoid keeping the txn open for long, instead 2 txns
---      * first txn: lock the rows using session level advisory locks and FOR UPDATE and UPDATE their status from new to being_processed
+--      * first txn: lock the rows using session level advisory locks
 --      * process the jobs
 --      * second txn: UPDATE the jobs to done (or DELETE them)
 --      * it can be augmented with LISTEN/NOTIFY (the client LISTENs, and a trigger on the job queue table sends NOTIFYs when new jobs are inserted)
---      * cleanup daemon: periodically find those rows in being_processed state that are not advisory-locked (and txn-level advisory lock them and FOR UPDATE) and UPDATE them back to new
 --TODO: design
 -- * the job queue table is created by the user (flexibility, allow integration to existing systems, etc.)
---  * but also provide a function to generate it for the lazy:
---      * create_job_queue_table(table_schema name, table_name name, columns
+--  * but also provide a function to generate it, so that one can set up everything from a sproc easily:
+--      * create_job_queue_table(table_schema text, table_name text, columns text[])
 -- * the extension provides a set of functions
 --  * functions that can generate the actual job fetching function(s) (they generate the function, the composite types, the index on the composite type on the sort cols if missing, makes sure pk_columns is indeed a PK)
---      * generate_fetcher_for_single_job(function_schema name, function_name name, queue_schema name, queue_table name, where_condition text, pk_columns text[], sort_columns text[])
---      * generate_fetcher_for_single_job(function_name name, queue_schema name, queue_table name, where_condition text, pk_columns text[], sort_columns text[])
+--      * generate_fetcher_for_single_job(function_schema text, function_name text, queue_table regclass, where_condition text, pk_columns text[], sort_columns text[])
+--      * generate_fetcher_for_single_job(function_name text, queue_table regclass, where_condition text, pk_columns text[], sort_columns text[])
 --          * if function_schema is missing/NULL then uses unqualified name (ie. uses the first elem of search_path)
 --          * if queue_schema is NULL then uses unqualified name (ie. uses search_path)
---      * generate_fetcher_for_multiple_jobs(function_schema name, function_name name, queue_schema name, queue_table name, where_condition text, pk_columns text[], group_and_sort_columns text[], sort_columns text[])
---      * generate_fetcher_for_multiple_jobs(function_name name, queue_schema name, queue_table name, where_condition text, pk_columns text[], group_and_sort_columns text[], sort_columns text[])
---      * generate_cleanup_daemon_function(function_schema name, function_name name, queue_schema name, queue_table name, where_condition text, pk_columns text[], state_filter text)
+--      * generate_fetcher_for_multiple_jobs(function_schema text, function_name text, queue_table regclass, where_condition text, pk_columns text[], group_and_sort_columns text[], sort_columns text[])
+--      * generate_fetcher_for_multiple_jobs(function_name text, queue_table regclass, where_condition text, pk_columns text[], group_and_sort_columns text[], sort_columns text[])
+--      * generate_cleanup_daemon_function(function_schema text, function_name text, queue_table regclass, where_condition text, pk_columns text[], state_filter text)
 --  * functions that just return the SQL statements to generate the fetching functions (ie. output of these is EXECUTE'd in the actual generator functions)
 --TODO: testing
 -- testing for parameter validation

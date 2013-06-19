@@ -1,4 +1,16 @@
 -- ideas:
+-- * always add id or ctid to sort_cols_t, so that it will fetch all rows with the same values for col1, ..., colN
+-- * instead of using composite types, write out the comparisons (eg. (col1A, col2A, col3A)::sort_cols_t > (col1B, col2B, col3B)::sort_cols_t -> (col1A > col1B OR ((col1A = col1B OR (col1A IS NULL AND col1B IS NULL)) AND (col2A > col2B OR ((col2A = col2B OR (col2A IS NULL AND col2B IS NULL)) AND (col3A > col3B))))) ) and allow "ASC/DESC [NULLS FIRST|LAST]" in the ORDER BY
+--  * pro:
+--   * makes possible to order different columns differently (ASC/DESC per column)
+--   * makes possible to use volatile functions in the sort "column" defs (cannot create an index for a composite type value containing expressions containing volatile functions; but if the index is on an expression not containing the volatile function but it's compared to the volatile function, it can use an index)
+--    * example:
+--     * this cannot use an index: (col1A, col2A + '3 days'::interval < current_timestamp)::sort_cols_t < (col1B, col2B + '3 days'::interval < current_timestamp)::sort_cols_t
+--     * but this can use indexes (one on col1, another on (col2 + '3 days'::interval)): col1A < col1B OR (col1A = col2A AND (col2A + '3 days'::interval < current_timestamp) < (col2B + '3 days'::interval < current_timestamp))
+--  * con: that cannot use an index efficiently OTOH an index on sort_cols_t can be used
+--   * example:
+--    * this requires only a single B-tree index scan (and it's used for the lookup of all cols): (col1A, col2A)::sort_cols_t < (col1B, col2B)::sort_cols_t
+--    * this requires 6 B-tree index scans (and the number of scans increases with the number of cols): col1A < col2A OR ((col1A = col2A OR (col1A IS NULL AND col1B IS NULL)) AND col2A < col2B)
 -- * using ctid and not id
 --TODO: documentation
 -- * not a full-fledged message queue system, lacking lots of features (not distributed, prolly not as effective - never benchmarked it, etc.)
@@ -54,6 +66,7 @@
 -- (makes sure that the same job is only processed by one worker and if a worker
 --  dies the job can be picked up by another worker, and workers do not block on
 --  waiting for each other)
+-- note: putting the pg_try_advisory_xact_lock() in a query with LIMIT may inadvertedly lock rows (b/c WHERE is executed before LIMIT, though pg usually only executes the WHERE expression on only as much rows as necessary), this approach works around that
 
 CREATE TABLE queue (
 	id serial,
@@ -62,73 +75,6 @@ CREATE TABLE queue (
 	created_at timestamp,
 	...
 );
-CREATE TYPE next_job_attrs_t AS (
-    id integer,
-    is_locked boolean
-);
-
--- worker processing one job from the queue:
-
--- note: putting the pg_try_advisory_xact_lock() in a query with LIMIT may inadvertedly lock rows (b/c WHERE is executed before LIMIT, though pg usually only executes the WHERE expression on only as much rows as necessary), this approach works around that:
-WITH RECURSIVE
-    next_job AS (
-        SELECT ((SELECT min(id) - 1  FROM queue), false)::next_job_attrs_t AS attrs
-        UNION ALL
-        SELECT
-                (
-                    SELECT (min(id), pg_try_advisory_xact_lock('queue'::regclass::int, min(id)))::next_job_attrs_t AS attrs
-                        FROM queue
-                        WHERE NOT is_done AND id > (next_job.attrs).id
-                )
-            FROM next_job
-            WHERE NOT (next_job.attrs).is_locked
-    )
-SELECT queue.*
-    FROM queue
-        JOIN next_job
-            ON ((next_job.attrs).id = queue.id AND (next_job.attrs).is_locked)
-    FOR UPDATE;
-
-
-<do the actual work>
-
-UPDATE queue SET processed = true WHERE id = ...; -- or you can even delete it (and drop "is_done" from the table definition)
-
-COMMIT;
-
---
--- the same as the above, but returns multiple (0..20) jobs in one batch:
---
-CREATE TYPE next_job_attrs_t AS (
-    id integer,
-    is_locked boolean
-);
-WITH RECURSIVE
-    next_job AS (
-        SELECT ((SELECT min(id) - 1  FROM queue), false)::next_job_attrs_t AS attrs, 1 AS rank
-        UNION ALL
-        SELECT
-                (
-                    SELECT (min(id), pg_try_advisory_xact_lock('queue'::regclass::int, min(id)))::next_job_attrs_t AS attrs
-                        FROM queue
-                        WHERE NOT is_done AND id > (next_job.attrs).id
-                ),
-                CASE
-                    WHEN (next_job.attrs).is_locked THEN next_job.rank + 1
-                    ELSE next_job.rank
-                END AS rank
-            FROM next_job
-            WHERE (next_job.attrs).id IS NOT NULL AND next_job.rank < 20
-    )
-SELECT queue.*
-    FROM queue
-        JOIN next_job
-            ON ((next_job.attrs).id = queue.id AND (next_job.attrs).is_locked)
-    FOR UPDATE;
-
---
--- getting the next job from the queue, but ordered by (col1, col2, col2) and not id:
---
 CREATE TYPE sort_cols_t AS (
     col1 integer,
     col2 integer,
@@ -139,6 +85,11 @@ CREATE TYPE attrs_t AS (
     cols sort_cols_t,
     is_locked boolean
 );
+
+-- worker processing one job from the queue, jobs are prioritized by (col1, col2, col3):
+
+BEGIN;
+
 WITH RECURSIVE
     next_job AS (
         SELECT attrs
@@ -174,8 +125,14 @@ SELECT queue.*
     ORDER BY (next_job.attrs).cols
     FOR UPDATE;
 
+<do the actual work>
+
+UPDATE queue SET processed = true WHERE id = ...; -- or you can even delete it (and drop "is_done" from the table definition)
+
+COMMIT;
+
 --
--- getting the next 20 jobs from the queue, but ordered by (col1, col2, col2) and not id:
+-- getting the next 20 jobs from the queue, prioritized by (col1, col2, col2):
 --
 CREATE TYPE sort_cols_t AS (
     col1 integer,
@@ -222,7 +179,8 @@ SELECT queue.*
     FOR UPDATE;
 
 --
--- getting the next 20 jobs from the queue, but ordered and grouped by (col1, col2, col3) and then ordered by (col4, col5, col6):
+-- getting the next 20 jobs from the queue, prioritized by and grouped by (col1, col2, col3) and then prioritized by (col4, col5, col6):
+-- the grouping means that all the rows returned will have the same values for (col1, col2, col3), and 
 --
 CREATE TYPE group_cols_t AS (
     col1 integer,

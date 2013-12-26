@@ -1,5 +1,6 @@
 -- ideas:
 -- * always add id or ctid to sort_cols_t, so that it will fetch all rows with the same values for col1, ..., colN
+-- * if all cols are NOT NULL in the sort_cols_t, do not create a composite type, but use a plain ROW(col1, ..., colN) - that can use a plain B-tree index on col1, ..., colN -, and use the plain list of cols in ORDER BY
 -- * instead of using composite types, write out the comparisons (eg. (col1A, col2A, col3A)::sort_cols_t > (col1B, col2B, col3B)::sort_cols_t -> (col1A > col1B OR ((col1A = col1B OR (col1A IS NULL AND col1B IS NULL)) AND (col2A > col2B OR ((col2A = col2B OR (col2A IS NULL AND col2B IS NULL)) AND (col3A > col3B))))) ) and allow "ASC/DESC [NULLS FIRST|LAST]" in the ORDER BY
 --  * pro:
 --   * makes possible to order different columns differently (ASC/DESC per column)

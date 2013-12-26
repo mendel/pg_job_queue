@@ -13,6 +13,7 @@
 --    * this requires only a single B-tree index scan (and it's used for the lookup of all cols): (col1A, col2A)::sort_cols_t < (col1B, col2B)::sort_cols_t
 --    * this requires 6 B-tree index scans (and the number of scans increases with the number of cols): col1A < col2A OR ((col1A = col2A OR (col1A IS NULL AND col1B IS NULL)) AND col2A < col2B)
 -- * using ctid and not id
+-- * fetch more than one row in each table/index scan (ie. "LIMIT 20 - next_job.rank + 1" instead of "LIMIT 1" in the recursive CTE parts, but also calculating the rank must be fixed, and then the current select-list-subquery form cannot return more than one row)
 --TODO: documentation
 -- * not a full-fledged message queue system, lacking lots of features (not distributed, prolly not as effective - never benchmarked it, etc.)
 -- * but for simple tasks it's good enough, and one can avoid using one more middleware component
@@ -162,7 +163,7 @@ WITH RECURSIVE
                                 WHERE NOT is_done
                                     AND cols > (next_job.attrs).cols
                                 ORDER BY cols
-                                LIMIT 1
+                                LIMIT 20
                         ) AS q
                 ) AS attrs,
                 CASE
@@ -227,7 +228,7 @@ WITH RECURSIVE
                                     AND sort_cols > (next_job.attrs).sort_cols
                                     AND (next_job.rank = 1 AND NOT (next_job.attrs).is_locked OR (next_job.attrs).group_cols = group_cols)
                                 ORDER BY sort_cols
-                                LIMIT 1
+                                LIMIT 20
                         ) AS q
                 ) AS attrs,
                 CASE
